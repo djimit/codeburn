@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { mkdir, open, readFile, rename, unlink } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
+import { withFileLock } from './file-lock.js'
 import type { DateRange, ProjectSummary } from './types.js'
 
 // Bumped to 8: local-model savings accounting is now part of the daily rollup
@@ -122,24 +123,26 @@ export async function loadDailyCache(): Promise<DailyCache> {
 }
 
 export async function saveDailyCache(cache: DailyCache): Promise<void> {
-  const dir = getCacheDir()
-  if (!existsSync(dir)) await mkdir(dir, { recursive: true })
-  const finalPath = getCachePath()
-  const tempPath = `${finalPath}.${randomBytes(8).toString('hex')}.tmp`
-  const payload = JSON.stringify(cache)
-  const handle = await open(tempPath, 'w', 0o600)
-  try {
-    await handle.writeFile(payload, { encoding: 'utf-8' })
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  try {
-    await rename(tempPath, finalPath)
-  } catch (err) {
-    try { await unlink(tempPath) } catch { /* ignore */ }
-    throw err
-  }
+  await withFileLock(getCachePath(), async () => {
+    const dir = getCacheDir()
+    if (!existsSync(dir)) await mkdir(dir, { recursive: true })
+    const finalPath = getCachePath()
+    const tempPath = `${finalPath}.${randomBytes(8).toString('hex')}.tmp`
+    const payload = JSON.stringify(cache)
+    const handle = await open(tempPath, 'w', 0o600)
+    try {
+      await handle.writeFile(payload, { encoding: 'utf-8' })
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    try {
+      await rename(tempPath, finalPath)
+    } catch (err) {
+      try { await unlink(tempPath) } catch { /* ignore */ }
+      throw err
+    }
+  })
 }
 
 export function addNewDays(cache: DailyCache, incoming: DailyEntry[], newestDate: string): DailyCache {

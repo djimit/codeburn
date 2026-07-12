@@ -4,6 +4,7 @@ import { homedir } from 'os'
 import { randomBytes } from 'crypto'
 
 import type { ParsedProviderCall } from './providers/types.js'
+import { withFileLock } from './file-lock.js'
 
 // Bumped to 3 for the workspace-aware breakdown change: the cursor parser
 // now derives `sessionId` from the bubble row key (the real composer id)
@@ -84,18 +85,14 @@ export async function writeCachedResults(
     calls,
   }
 
-  // Atomic write: stage to a randomized temp file in the same directory,
-  // then rename onto the final path. rename() is atomic on POSIX, so a
-  // crash mid-write never leaves a half-written cache, and concurrent
-  // CLI invocations using their own random temp names cannot interleave
-  // bytes in the destination file (they only race on the final rename,
-  // last-writer-wins, both with valid content).
   const target = getCachePath()
-  const tempPath = `${target}.${randomBytes(8).toString('hex')}.tmp`
-  try {
-    await writeFile(tempPath, JSON.stringify(cache), 'utf-8')
-    await rename(tempPath, target)
-  } catch {
-    await unlink(tempPath).catch(() => {})
-  }
+  await withFileLock(target, async () => {
+    const tempPath = `${target}.${randomBytes(8).toString('hex')}.tmp`
+    try {
+      await writeFile(tempPath, JSON.stringify(cache), 'utf-8')
+      await rename(tempPath, target)
+    } catch {
+      await unlink(tempPath).catch(() => {})
+    }
+  })
 }

@@ -6,12 +6,12 @@ import { calculateCost, getShortModelName } from '../models.js'
 import { blobToText, getSqliteLoadError, isSqliteAvailable, openDatabase, type SqliteDatabase } from '../sqlite.js'
 import type { ParsedProviderCall, Provider, SessionParser, SessionSource } from './types.js'
 import { safeNumber } from '../parser.js'
+import { estimateTokens } from '../token-estimate.js'
 
 const WARP_GROUP_CONTAINER = '2BBY89MBSN.dev.warp'
 const WARP_STABLE_BUNDLE_ID = 'dev.warp.Warp-Stable'
 const WARP_PREVIEW_BUNDLE_ID = 'dev.warp.Warp-Preview'
 const PRIMARY_AGENT_CATEGORY = 'primary_agent'
-const CHARS_PER_TOKEN = 4
 
 const modelAliases: Record<string, string> = {
   'Claude Sonnet 4.6': 'claude-sonnet-4-6',
@@ -199,7 +199,7 @@ function extractUserMessage(rawInput: string): string {
 function estimateWeight(rawInput: string): number {
   const userMessage = extractUserMessage(rawInput)
   const source = userMessage || rawInput
-  const tokens = Math.ceil(source.length / CHARS_PER_TOKEN)
+  const tokens = estimateTokens(source)
   return Math.max(1, tokens)
 }
 

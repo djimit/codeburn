@@ -4,8 +4,8 @@ import { join } from 'path'
 import { homedir } from 'os'
 
 import { readSessionFile } from './fs-utils.js'
+import { estimateTokens } from './token-estimate.js'
 
-const CHARS_PER_TOKEN = 4
 const SYSTEM_BASE_TOKENS = 10400
 const TOOL_TOKENS_OVERHEAD = 400
 const SKILL_FRONTMATTER_TOKENS = 80
@@ -17,10 +17,6 @@ export type ContextBudget = {
   memory: { count: number; tokens: number; files: Array<{ name: string; tokens: number }> }
   total: number
   modelContext: number
-}
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN)
 }
 
 async function readConfigFile(path: string): Promise<Record<string, unknown> | null> {

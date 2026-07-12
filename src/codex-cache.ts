@@ -5,6 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 
 import type { ParsedProviderCall } from './providers/types.js'
+import { withFileLock } from './file-lock.js'
 
 const CODEX_CACHE_VERSION = 3
 const CACHE_FILE = 'codex-results.json'
@@ -111,33 +112,29 @@ export async function writeCachedCodexResults(
 export async function flushCodexCache(): Promise<void> {
   if (!memCache) return
   try {
-    // Evict entries for files that no longer exist on disk
-    const paths = Object.keys(memCache.files)
-    for (const p of paths) {
-      try {
-        await stat(p)
-      } catch {
-        delete memCache.files[p]
+    await withFileLock(getCachePath(), async () => {
+      const paths = Object.keys(memCache!.files)
+      for (const p of paths) {
+        try { await stat(p) } catch { delete memCache!.files[p] }
       }
-    }
-
-    const dir = getCacheDir()
-    if (!existsSync(dir)) await mkdir(dir, { recursive: true })
-    const finalPath = getCachePath()
-    const tempPath = `${finalPath}.${randomBytes(8).toString('hex')}.tmp`
-    const payload = JSON.stringify(memCache)
-    const handle = await open(tempPath, 'w', 0o600)
-    try {
-      await handle.writeFile(payload, { encoding: 'utf-8' })
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
-    try {
-      await rename(tempPath, finalPath)
-    } catch (err) {
-      try { await unlink(tempPath) } catch {}
-      throw err
-    }
+      const dir = getCacheDir()
+      if (!existsSync(dir)) await mkdir(dir, { recursive: true })
+      const finalPath = getCachePath()
+      const tempPath = `${finalPath}.${randomBytes(8).toString('hex')}.tmp`
+      const payload = JSON.stringify(memCache)
+      const handle = await open(tempPath, 'w', 0o600)
+      try {
+        await handle.writeFile(payload, { encoding: 'utf-8' })
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      try {
+        await rename(tempPath, finalPath)
+      } catch (err) {
+        try { await unlink(tempPath) } catch {}
+        throw err
+      }
+    })
   } catch {}
 }

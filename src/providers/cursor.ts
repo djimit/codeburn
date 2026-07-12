@@ -5,6 +5,7 @@ import { homedir } from 'os'
 import { calculateCost } from '../models.js'
 import { readCachedResults, writeCachedResults } from '../cursor-cache.js'
 import { isSqliteAvailable, getSqliteLoadError, openDatabase, blobToText, type SqliteDatabase } from '../sqlite.js'
+import { estimateTokensFromChars } from '../token-estimate.js'
 import type { DateRange } from '../types.js'
 import type { Provider, SessionSource, SessionParser, ParsedProviderCall } from './types.js'
 
@@ -73,8 +74,6 @@ type AgentKvContent = {
     }
   }
 }
-
-const CHARS_PER_TOKEN = 4
 
 function getCursorDbPath(): string {
   if (process.platform === 'darwin') {
@@ -469,9 +468,9 @@ function parseBubbles(
         const textLen = row.text_length ?? 0
         if (textLen === 0) continue
         if (row.bubble_type === 1) {
-          inputTokens = Math.ceil(textLen / CHARS_PER_TOKEN)
+          inputTokens = estimateTokensFromChars(textLen)
         } else {
-          outputTokens = Math.ceil(textLen / CHARS_PER_TOKEN)
+          outputTokens = estimateTokensFromChars(textLen)
         }
       }
 
@@ -642,8 +641,8 @@ function parseAgentKv(db: SqliteDatabase, seenKeys: Set<string>, dbPath: string)
   for (const [requestId, session] of sessions) {
     if (session.inputChars === 0 && session.outputChars === 0) continue
 
-    const inputTokens = Math.ceil(session.inputChars / CHARS_PER_TOKEN)
-    const outputTokens = Math.ceil(session.outputChars / CHARS_PER_TOKEN)
+    const inputTokens = estimateTokensFromChars(session.inputChars)
+    const outputTokens = estimateTokensFromChars(session.outputChars)
     const dedupKey = `cursor:agentKv:${requestId}`
 
     if (seenKeys.has(dedupKey)) continue

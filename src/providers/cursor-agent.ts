@@ -7,6 +7,7 @@ import { homedir } from 'os'
 import { calculateCost } from '../models.js'
 import { openDatabase, type SqliteDatabase } from '../sqlite.js'
 import { normalizeContentBlocks } from '../content-utils.js'
+import { estimateTokensFromChars } from '../token-estimate.js'
 import type {
   Provider,
   SessionSource,
@@ -33,7 +34,6 @@ type ParsedTurn = {
 }
 
 const CURSOR_AGENT_COST_MODEL = 'claude-sonnet-4-5'
-const CHARS_PER_TOKEN = 4
 const MAX_USER_TEXT_LENGTH = 500
 const DIGITS_ONLY = /^\d+$/
 const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -79,9 +79,9 @@ function getAttributionDbPath(baseDir: string): string {
   return join(baseDir, 'ai-tracking', 'ai-code-tracking.db')
 }
 
-function estimateTokens(charCount: number): number {
+function estimateTokensLocal(charCount: number): number {
   if (charCount <= 0) return 0
-  return Math.ceil(charCount / CHARS_PER_TOKEN)
+  return estimateTokensFromChars(charCount)
 }
 
 function parseToolName(raw: string): string {
@@ -374,9 +374,9 @@ function createParser(
 
         for (let turnIndex = 0; turnIndex < parsed.turns.length; turnIndex++) {
           const turn = parsed.turns[turnIndex]!
-          const inputTokens = estimateTokens(turn.userMessage.length)
-          const outputTokens = estimateTokens(turn.assistant.body.length)
-          const reasoningTokens = estimateTokens(turn.assistant.reasoning.length)
+          const inputTokens = estimateTokensLocal(turn.userMessage.length)
+          const outputTokens = estimateTokensLocal(turn.assistant.body.length)
+          const reasoningTokens = estimateTokensLocal(turn.assistant.reasoning.length)
           const deduplicationKey = `cursor-agent:${conversationId}:${turnIndex}`
 
           if (seenKeys.has(deduplicationKey)) continue

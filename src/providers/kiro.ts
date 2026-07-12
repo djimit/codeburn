@@ -5,10 +5,10 @@ import { homedir } from 'os'
 
 import { readSessionFile } from '../fs-utils.js'
 import { calculateCost } from '../models.js'
+import { estimateTokens, estimateTokensFromChars } from '../token-estimate.js'
 import type { ToolCall } from '../types.js'
 import type { Provider, SessionSource, SessionParser, ParsedProviderCall } from './types.js'
 
-const CHARS_PER_TOKEN = 4
 const MIN_REASONABLE_TIMESTAMP_MS = 1_000_000_000_000
 const MODERN_CONVERSATION_KEYS = ['messages', 'conversation', 'chat', 'transcript', 'entries', 'events']
 
@@ -205,8 +205,8 @@ function parseChatFile(data: KiroChatFile, sessionId: string, project: string, s
   const dedupKey = `kiro:${sessionId}:${data.executionId}`
   if (seenKeys.has(dedupKey)) return results
 
-  const outputTokens = Math.ceil(totalOutputChars / CHARS_PER_TOKEN)
-  const inputTokens = Math.ceil(pendingUserMessage.length / CHARS_PER_TOKEN)
+  const outputTokens = estimateTokensFromChars(totalOutputChars)
+  const inputTokens = estimateTokens(pendingUserMessage)
   const costUSD = calculateCost(modelId, inputTokens, outputTokens, 0, 0, 0)
   const tsDate = parseKiroTimestamp(metadata.startTime)
   if (!tsDate) return results
@@ -315,8 +315,8 @@ function parseModernExecution(data: KiroModernExecution, sourcePath: string, see
   const tsDate = parseKiroTimestamp(rawStartTime)
   if (!tsDate) return results
 
-  const inputTokens = Math.ceil(inputChars / CHARS_PER_TOKEN)
-  const outputTokens = Math.ceil(outputChars / CHARS_PER_TOKEN)
+  const inputTokens = estimateTokensFromChars(inputChars)
+  const outputTokens = estimateTokensFromChars(outputChars)
   const costUSD = calculateCost(modelId, inputTokens, outputTokens, 0, 0, 0)
   seenKeys.add(dedupKey)
 
