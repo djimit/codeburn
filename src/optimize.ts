@@ -1881,7 +1881,7 @@ function estimateLowWorthRecoverableTokens(
   retries: number,
 ): number {
   const tokens = sessionTokenTotal(session)
-  if (editTurns === 0) return tokens
+  if (editTurns === 0) return 0
   const totalTurns = sessionTotalTurns(session)
   if (totalTurns === 0) return 0
   const fraction = Math.min(1, Math.max(0, retries / totalTurns))

@@ -598,9 +598,8 @@ describe('detectLowWorthSessions', () => {
     expect(finding!.title).toContain('possibly low-worth')
     expect(finding!.explanation).toContain('app/s1')
     expect(finding!.explanation).toContain('no edit turns')
-    // sessionTokenTotal = input + output + cache. The lowWorthSession helper
-    // sets input=output=cost*1000, so the savings ceiling is 2x cost*1000.
-    expect(finding!.tokensSaved).toBe(8_000)
+    // Zero-edit sessions: no recoverable tokens (no evidence the work was worth it)
+    expect(finding!.tokensSaved).toBe(0)
   })
 
   it('flags retry-heavy sessions', () => {
@@ -637,13 +636,13 @@ describe('detectLowWorthSessions', () => {
     expect(finding!.tokensSaved).toBe(4_000)
   })
 
-  it('uses full session tokens as the savings ceiling for no-edit sessions', () => {
+  it('returns zero recoverable tokens for no-edit sessions', () => {
     const project = projectWithLowWorthSessions([
       lowWorthSession(4, 0, { turns: [lowWorthTurn({ hasEdits: false })] }),
     ])
     const finding = detectLowWorthSessions([project])
-    // No edits at all -> entire session is at risk. sessionTokenTotal = 8K.
-    expect(finding!.tokensSaved).toBe(8_000)
+    // No edits -> no recoverable tokens (issue #640)
+    expect(finding!.tokensSaved).toBe(0)
   })
 
   it('keeps all reasons that apply to the same session', () => {

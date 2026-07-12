@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { createHash, randomBytes } from 'crypto'
 import { join } from 'path'
 import { homedir } from 'os'
+import { withFileLock } from './file-lock.js'
 
 import type { ToolCall } from './types.js'
 
@@ -24,6 +25,7 @@ export type CachedCall = {
   model: string
   usage: CachedUsage
   costUSD?: number
+  costIsEstimated?: boolean
   speed: 'standard' | 'fast'
   timestamp: string
   tools: string[]
@@ -249,28 +251,30 @@ export async function loadCache(): Promise<SessionCache> {
 }
 
 export async function saveCache(cache: SessionCache): Promise<void> {
-  const dir = getCacheDir()
-  if (!existsSync(dir)) await mkdir(dir, { recursive: true })
+  await withFileLock(getCachePath(), async () => {
+    const dir = getCacheDir()
+    if (!existsSync(dir)) await mkdir(dir, { recursive: true })
 
-  const finalPath = getCachePath()
-  const tempPath = `${finalPath}.${randomBytes(8).toString('hex')}.tmp`
-  delete (cache as { _dirty?: boolean })._dirty
-  const payload = JSON.stringify(cache)
+    const finalPath = getCachePath()
+    const tempPath = `${finalPath}.${randomBytes(8).toString('hex')}.tmp`
+    delete (cache as { _dirty?: boolean })._dirty
+    const payload = JSON.stringify(cache)
 
-  const handle = await open(tempPath, 'w', 0o600)
-  try {
-    await handle.writeFile(payload, { encoding: 'utf-8' })
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
+    const handle = await open(tempPath, 'w', 0o600)
+    try {
+      await handle.writeFile(payload, { encoding: 'utf-8' })
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
 
-  try {
-    await rename(tempPath, finalPath)
-  } catch (err) {
-    try { await unlink(tempPath) } catch {}
-    throw err
-  }
+    try {
+      await rename(tempPath, finalPath)
+    } catch (err) {
+      try { await unlink(tempPath) } catch {}
+      throw err
+    }
+  })
 }
 
 // ── File Fingerprinting ────────────────────────────────────────────────

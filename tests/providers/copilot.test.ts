@@ -149,6 +149,32 @@ describe('copilot provider - JSONL parsing', () => {
     ])
   })
 
+  it('extracts skill names from skill toolRequests (issue #654)', async () => {
+    const skillEvent = JSON.stringify({
+      type: 'assistant.message',
+      timestamp: '2026-04-15T10:00:15Z',
+      data: {
+        messageId: 'msg-skill',
+        outputTokens: 120,
+        interactionId: 'int-1',
+        toolRequests: [
+          { name: 'skill', toolCallId: 'call-skill-1', type: 'function', arguments: { skill: 'code-review' } },
+          { name: 'skill', toolCallId: 'call-skill-2', type: 'function', arguments: { skill: 'write-tests' } },
+          { name: 'read_file', toolCallId: 'call-read', type: 'function' },
+        ],
+      },
+    })
+    const eventsPath = await createSessionDir('sess-skills', [
+      modelChange('gpt-4.1'),
+      userMessage('review my code'),
+      skillEvent,
+    ])
+    const source = { path: eventsPath, project: 'test', provider: 'copilot' }
+    const calls: ParsedProviderCall[] = []
+    for await (const call of copilot.createSessionParser(source, new Set()).parse()) calls.push(call)
+    expect(calls[0]!.tools).toEqual(['skill:code-review', 'skill:write-tests', 'Read'])
+  })
+
   it('does not crash on malformed toolRequests (string / null / missing)', async () => {
     // Regression guard: a corrupt session previously aborted the whole file's
     // parse loop because .map was called on a non-array. The fix coerces any

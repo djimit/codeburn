@@ -1281,6 +1281,7 @@ function buildSessionSummary(
   let totalCacheRead = 0
   let totalCacheWrite = 0
   let apiCalls = 0
+  let totalCostIsEstimated = true
   let firstTs = ''
   let lastTs = ''
 
@@ -1318,6 +1319,7 @@ function buildSessionSummary(
       const callSavings = call.savingsUSD ?? 0
       totalCost += call.costUSD
       totalSavings += callSavings
+      if (!call.costIsEstimated) totalCostIsEstimated = false
       totalInput += call.usage.inputTokens
       totalOutput += call.usage.outputTokens
       totalCacheRead += call.usage.cacheReadInputTokens
@@ -1373,6 +1375,7 @@ function buildSessionSummary(
     lastTimestamp: lastTs || turns[turns.length - 1]?.timestamp || '',
     totalCostUSD: totalCost,
     totalSavingsUSD: totalSavings,
+    totalCostIsEstimated,
     totalInputTokens: totalInput,
     totalOutputTokens: totalOutput,
     totalCacheReadTokens: totalCacheRead,
@@ -1692,6 +1695,7 @@ function providerCallToTurn(call: ParsedProviderCall): ParsedTurn {
     model: call.model,
     usage,
     costUSD: call.costUSD,
+    costIsEstimated: call.costIsEstimated,
     tools,
     mcpTools: extractMcpTools(tools),
     skills: [],
@@ -1729,6 +1733,7 @@ function providerCallToCachedCall(call: ParsedProviderCall): CachedCall {
       cacheCreationOneHourTokens: 0,
     },
     costUSD: (call.provider === 'mistral-vibe' || call.provider === 'antigravity' || call.provider === 'devin' || call.provider === 'vercel-gateway') ? call.costUSD : undefined,
+    costIsEstimated: call.costIsEstimated,
     speed: call.speed,
     timestamp: call.timestamp,
     tools: call.tools,
@@ -1760,6 +1765,7 @@ function apiCallToCachedCall(call: ParsedApiCall): CachedCall {
     provider: call.provider,
     model: call.model,
     usage: { ...call.usage, cacheCreationOneHourTokens: call.cacheCreationOneHourTokens ?? 0 },
+    costIsEstimated: call.costIsEstimated,
     speed: call.speed,
     timestamp: call.timestamp,
     tools: call.tools,
@@ -1840,6 +1846,7 @@ function cachedCallToApiCall(call: CachedCall): ParsedApiCall {
       webSearchRequests: u.webSearchRequests,
     },
     costUSD: call.costUSD ?? costUSD,
+    costIsEstimated: call.costIsEstimated ?? (call.costUSD === undefined),
     tools: call.tools,
     mcpTools: extractMcpTools(call.tools),
     skills: call.skills,

@@ -74,6 +74,7 @@ export type ParsedApiCall = {
   model: string
   usage: TokenUsage
   costUSD: number
+  costIsEstimated?: boolean
   tools: string[]
   mcpTools: string[]
   skills: string[]
@@ -134,6 +135,7 @@ export type SessionSummary = {
   lastTimestamp: string
   totalCostUSD: number
   totalSavingsUSD: number
+  totalCostIsEstimated?: boolean
   totalInputTokens: number
   totalOutputTokens: number
   totalCacheReadTokens: number

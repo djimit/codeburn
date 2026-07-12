@@ -114,41 +114,80 @@ function getCommitsInRange(cwd: string, since: Date, until: Date, mainBranch: st
   })
 }
 
-function categorizeSession(
-  session: SessionSummary,
+type SessionWithTime = {
+  session: SessionSummary
+  midpoint: Date
+  start: Date
+  end: Date
+}
+
+function categorizeSessions(
+  sessions: SessionSummary[],
   commits: CommitInfo[]
-): { category: YieldCategory; commitCount: number } {
-  if (!session.firstTimestamp) {
-    return { category: 'abandoned', commitCount: 0 }
+): Array<{ category: YieldCategory; commitCount: number }> {
+  if (sessions.length === 0) return []
+  if (commits.length === 0) {
+    return sessions.map(() => ({ category: 'abandoned' as YieldCategory, commitCount: 0 }))
   }
 
-  const sessionStart = new Date(session.firstTimestamp)
-  const lastTs = session.lastTimestamp ?? session.firstTimestamp
-  const sessionEnd = new Date(new Date(lastTs).getTime() + 60 * 60 * 1000) // +1 hour
+  const sessionsWithTime: SessionWithTime[] = sessions.map(session => {
+    const start = new Date(session.firstTimestamp)
+    const lastTs = session.lastTimestamp ?? session.firstTimestamp
+    const end = new Date(new Date(lastTs).getTime() + 60 * 60 * 1000)
+    const midpoint = new Date((start.getTime() + end.getTime()) / 2)
+    return { session, midpoint, start, end }
+  })
 
-  const relevantCommits = commits.filter(c =>
-    c.timestamp >= sessionStart && c.timestamp <= sessionEnd
-  )
-
-  if (relevantCommits.length === 0) {
-    return { category: 'abandoned', commitCount: 0 }
+  // Assign each commit to the nearest session by midpoint distance.
+  // Prevents overlapping sessions from double-counting the same commit (issue #640).
+  const commitAssignments = new Map<string, number>()
+  for (const commit of commits) {
+    let bestSessionIdx = -1
+    let bestDistance = Infinity
+    for (let i = 0; i < sessionsWithTime.length; i++) {
+      const st = sessionsWithTime[i]
+      if (commit.timestamp < st.start || commit.timestamp > st.end) continue
+      const distance = Math.abs(commit.timestamp.getTime() - st.midpoint.getTime())
+      if (distance < bestDistance) {
+        bestDistance = distance
+        bestSessionIdx = i
+      }
+    }
+    if (bestSessionIdx >= 0) {
+      const key = commit.sha.toLowerCase()
+      // Only assign if this session is closer than any previous assignment
+      const existing = commitAssignments.get(key)
+      if (existing === undefined) {
+        commitAssignments.set(key, bestSessionIdx)
+      }
+    }
   }
 
-  const inMainCount = relevantCommits.filter(c => c.inMain).length
-  // A session is "reverted" when at least half of its in-main commits were
-  // later reverted out (revert detected via "This reverts commit <sha>"
-  // anywhere later in history, not in the same time window).
-  const revertedCount = relevantCommits.filter(c => c.inMain && c.wasReverted).length
-
-  if (revertedCount > 0 && revertedCount >= inMainCount / 2) {
-    return { category: 'reverted', commitCount: relevantCommits.length }
+  // Build per-session commit lists
+  const sessionCommits: CommitInfo[][] = sessions.map(() => [])
+  for (const commit of commits) {
+    const key = commit.sha.toLowerCase()
+    const assignedIdx = commitAssignments.get(key)
+    if (assignedIdx !== undefined) {
+      sessionCommits[assignedIdx].push(commit)
+    }
   }
 
-  if (inMainCount > 0) {
-    return { category: 'productive', commitCount: inMainCount }
-  }
-
-  return { category: 'abandoned', commitCount: relevantCommits.length }
+  return sessionsWithTime.map((st, idx) => {
+    const relevantCommits = sessionCommits[idx]
+    if (!st.session.firstTimestamp || relevantCommits.length === 0) {
+      return { category: 'abandoned' as YieldCategory, commitCount: 0 }
+    }
+    const inMainCount = relevantCommits.filter(c => c.inMain).length
+    const revertedCount = relevantCommits.filter(c => c.inMain && c.wasReverted).length
+    if (revertedCount > 0 && revertedCount >= inMainCount / 2) {
+      return { category: 'reverted' as YieldCategory, commitCount: relevantCommits.length }
+    }
+    if (inMainCount > 0) {
+      return { category: 'productive' as YieldCategory, commitCount: inMainCount }
+    }
+    return { category: 'abandoned' as YieldCategory, commitCount: relevantCommits.length }
+  })
 }
 
 export async function computeYield(range: DateRange, cwd: string): Promise<YieldSummary> {
@@ -177,8 +216,11 @@ export async function computeYield(range: DateRange, cwd: string): Promise<Yield
       ? getCommitsInRange(projectCwd, range.start, range.end, getMainBranch(projectCwd))
       : commits
 
-    for (const session of project.sessions) {
-      const { category, commitCount } = categorizeSession(session, projectCommits)
+    const categories = categorizeSessions(project.sessions, projectCommits)
+
+    for (let i = 0; i < project.sessions.length; i++) {
+      const session = project.sessions[i]
+      const { category, commitCount } = categories[i]
 
       summary[category].cost += session.totalCostUSD
       summary[category].sessions += 1

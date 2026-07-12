@@ -5,6 +5,7 @@ import { homedir } from 'os'
 
 import { readSessionFile } from '../fs-utils.js'
 import { calculateCost } from '../models.js'
+import { estimateTokens } from '../token-estimate.js'
 import type { Provider, SessionSource, SessionParser, ParsedProviderCall } from './types.js'
 
 const modelDisplayNames: Record<string, string> = {
@@ -83,7 +84,6 @@ function normalizeToolName(rawTool?: unknown): string {
   return normalizeCopilotMcpTool(rawTool) ?? rawTool
 }
 
-const CHARS_PER_TOKEN = 4
 const COPILOT_OPENAI_AUTO = 'copilot-openai-auto'
 const COPILOT_ANTHROPIC_AUTO = 'copilot-anthropic-auto'
 
@@ -95,6 +95,7 @@ type LegacyToolRequest = {
   name?: string
   toolCallId?: string
   type?: string
+  arguments?: Record<string, unknown>
 }
 
 // Per-event-type shapes. The previous union included a permissive catch-all
@@ -157,7 +158,13 @@ function parseLegacyEvents(content: string, sessionId: string, seenKeys: Set<str
       // that follows the bad event.
       const toolRequests = Array.isArray(rawToolRequests) ? rawToolRequests : []
       const tools = toolRequests
-        .map(t => normalizeToolName(t?.name))
+        .map(t => {
+          if (t?.name === 'skill' && t?.arguments && typeof t.arguments === 'object') {
+            const skillName = (t.arguments as Record<string, unknown>).skill
+            if (typeof skillName === 'string' && skillName) return `skill:${skillName}`
+          }
+          return normalizeToolName(t?.name)
+        })
         .filter(Boolean)
 
       const costUSD = calculateCost(currentModel, 0, outputTokens, 0, 0, 0)
@@ -308,17 +315,23 @@ function parseTranscriptEvents(content: string, sessionId: string, seenKeys: Set
       let outputTokens = data.outputTokens ?? 0
       let reasoningTokens = 0
       if (outputTokens === 0) {
-        outputTokens = Math.ceil(contentText.length / CHARS_PER_TOKEN)
-        reasoningTokens = Math.ceil(reasoningText.length / CHARS_PER_TOKEN)
+        outputTokens = estimateTokens(contentText)
+        reasoningTokens = estimateTokens(reasoningText)
       }
 
-      const inputTokens = Math.ceil(pendingUserMessage.length / CHARS_PER_TOKEN)
+      const inputTokens = estimateTokens(pendingUserMessage)
 
       // Same defensive guard as the modern event branch — corrupt legacy
       // sessions have shipped toolRequests as non-array values.
       const legacyToolRequests = Array.isArray(data.toolRequests) ? data.toolRequests : []
       const tools = legacyToolRequests
-        .map(t => normalizeToolName(t?.name))
+        .map(t => {
+          if (t?.name === 'skill' && t?.arguments && typeof t.arguments === 'object') {
+            const skillName = (t.arguments as Record<string, unknown>).skill
+            if (typeof skillName === 'string' && skillName) return `skill:${skillName}`
+          }
+          return normalizeToolName(t?.name)
+        })
         .filter(Boolean)
 
       const costUSD = calculateCost(model, inputTokens, outputTokens + reasoningTokens, 0, 0, 0)
@@ -454,11 +467,11 @@ function parseJetBrainsEvents(content: string, sessionId: string, seenKeys: Set<
       let outputTokens = data.outputTokens ?? 0
       let reasoningTokens = 0
       if (outputTokens === 0) {
-        outputTokens = Math.ceil(contentText.length / CHARS_PER_TOKEN)
-        reasoningTokens = Math.ceil(reasoningText.length / CHARS_PER_TOKEN)
+        outputTokens = estimateTokens(contentText)
+        reasoningTokens = estimateTokens(reasoningText)
       }
 
-      const inputTokens = Math.ceil(userMsg.length / CHARS_PER_TOKEN)
+      const inputTokens = estimateTokens(userMsg)
       const tools = toolsByTurn.get(currentTurnId || messageId) ?? []
       const costUSD = calculateCost(model, inputTokens, outputTokens + reasoningTokens, 0, 0, 0)
 
