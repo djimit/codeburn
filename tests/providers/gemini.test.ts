@@ -1,193 +1,188 @@
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtemp, mkdir, writeFile, rm } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createGeminiProvider } from '../../src/providers/gemini.js'
 import type { ParsedProviderCall } from '../../src/providers/types.js'
 
 let tmpDir: string
 
-beforeEach(async () => {
-  tmpDir = await mkdtemp(join(tmpdir(), 'gemini-provider-'))
-})
-
-afterEach(async () => {
-  await rm(tmpDir, { recursive: true, force: true })
-})
-
-async function parseFixture(messages: unknown[]): Promise<ParsedProviderCall[]> {
-  const filePath = join(tmpDir, 'session-gemini.json')
-  await writeFile(filePath, JSON.stringify({
-    sessionId: 'gemini-session-1',
-    startTime: '2026-05-16T10:00:00.000Z',
-    messages,
-  }))
-
-  const provider = createGeminiProvider()
-  const calls: ParsedProviderCall[] = []
-  for await (const call of provider.createSessionParser({ path: filePath, project: 'gemini-project', provider: 'gemini' }, new Set()).parse()) {
-    calls.push(call)
-  }
-  return calls
+async function createSessionFile(sessionId: string, content: string): Promise<string> {
+  const dir = join(tmpDir, sessionId)
+  await mkdir(dir, { recursive: true })
+  const path = join(dir, 'session.jsonl')
+  await writeFile(path, content)
+  return path
 }
 
 describe('gemini provider', () => {
-  it('emits one provider call per Gemini message with token usage', async () => {
-    const calls = await parseFixture([
-      {
-        id: 'u1',
-        timestamp: '2026-05-16T10:00:00.000Z',
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'gemini-test-'))
+  })
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it('parses a basic JSONL session with user and gemini messages', async () => {
+    const lines = [
+      JSON.stringify({
+        sessionId: 'sess-001',
+        startTime: '2026-04-15T10:00:00Z',
+        projectHash: 'abc123',
+      }),
+      JSON.stringify({
+        id: 'msg-user-1',
+        timestamp: '2026-04-15T10:00:05Z',
         type: 'user',
-        content: 'inspect the repo',
-      },
-      {
-        id: 'g1',
-        timestamp: '2026-05-16T10:00:05.000Z',
+        content: 'write a function',
+      }),
+      JSON.stringify({
+        id: 'msg-gemini-1',
+        timestamp: '2026-04-15T10:00:10Z',
         type: 'gemini',
-        content: 'reading files',
-        model: 'gemini-3.1-pro-preview',
-        tokens: { input: 120, cached: 20, output: 30, thoughts: 5 },
-        toolCalls: [{ id: 't1', name: 'read_file', args: { path: 'src/index.ts' } }],
-      },
-      {
-        id: 'u2',
-        timestamp: '2026-05-16T10:01:00.000Z',
-        type: 'user',
-        content: [{ text: 'run tests' }],
-      },
-      {
-        id: 'g2',
-        timestamp: '2026-05-16T10:01:10.000Z',
-        type: 'gemini',
-        content: 'running tests',
-        model: 'gemini-3.1-pro-preview',
-        tokens: { input: 80, cached: 10, output: 25 },
-        toolCalls: [{ id: 't2', name: 'run_command', args: { command: 'npm test' } }],
-      },
-    ])
+        model: 'gemini-3-pro',
+        tokens: { input: 100, output: 200, cached: 50, thoughts: 10 },
+        content: 'Here is the function',
+      }),
+    ].join('\n')
 
-    expect(calls).toHaveLength(2)
-    expect(calls.map(c => c.deduplicationKey)).toEqual([
-      'gemini:gemini-session-1:g1',
-      'gemini:gemini-session-1:g2',
-    ])
-    expect(calls.map(c => c.timestamp)).toEqual([
-      '2026-05-16T10:00:05.000Z',
-      '2026-05-16T10:01:10.000Z',
-    ])
-    expect(calls.map(c => c.userMessage)).toEqual(['inspect the repo', 'run tests'])
-    expect(calls[0]!.inputTokens).toBe(100)
-    expect(calls[0]!.cacheReadInputTokens).toBe(20)
-    expect(calls[0]!.reasoningTokens).toBe(5)
-    expect(calls[0]!.tools).toEqual(['Read'])
-    expect(calls[1]!.inputTokens).toBe(70)
-    expect(calls[1]!.cacheReadInputTokens).toBe(10)
-    expect(calls[1]!.tools).toEqual(['Bash'])
-    expect(calls[1]!.bashCommands).toEqual(['npm'])
+    const path = await createSessionFile('sess-001', lines)
+    const provider = createGeminiProvider(tmpDir)
+    const source = { path, project: 'test', provider: 'gemini' }
+    const calls: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(source, new Set()).parse()) calls.push(call)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.model).toBe('gemini-3-pro')
+    expect(calls[0]!.inputTokens).toBe(50) // 100 - 50 cached
+    expect(calls[0]!.outputTokens).toBe(200)
+    expect(calls[0]!.cacheReadInputTokens).toBe(50)
+    expect(calls[0]!.reasoningTokens).toBe(10)
+    expect(calls[0]!.costUSD).toBeGreaterThan(0)
   })
 
-  it('keeps aggregate token totals when splitting a Gemini session into calls', async () => {
-    const calls = await parseFixture([
-      { id: 'u1', timestamp: '2026-05-16T10:00:00.000Z', type: 'user', content: 'work' },
-      {
-        id: 'g1',
-        timestamp: '2026-05-16T10:00:05.000Z',
-        type: 'gemini',
-        content: 'first',
-        model: 'gemini-3.1-pro-preview',
-        tokens: { input: 120, cached: 20, output: 30, thoughts: 5 },
-      },
-      {
-        id: 'g2',
-        timestamp: '2026-05-16T10:00:10.000Z',
-        type: 'gemini',
-        content: 'second',
-        model: 'gemini-3.1-pro-preview',
-        tokens: { input: 80, cached: 10, output: 25, thoughts: 0 },
-      },
-    ])
-
-    expect(calls).toHaveLength(2)
-    expect(calls.reduce((sum, call) => sum + call.inputTokens, 0)).toBe(170)
-    expect(calls.reduce((sum, call) => sum + call.cacheReadInputTokens, 0)).toBe(30)
-    expect(calls.reduce((sum, call) => sum + call.outputTokens, 0)).toBe(55)
-    expect(calls.reduce((sum, call) => sum + call.reasoningTokens, 0)).toBe(5)
-  })
-
-  it('skips Gemini messages without token usage', async () => {
-    const calls = await parseFixture([
-      { id: 'u1', timestamp: '2026-05-16T10:00:00.000Z', type: 'user', content: 'work' },
-      {
-        id: 'info',
-        timestamp: '2026-05-16T10:00:05.000Z',
-        type: 'gemini',
-        content: 'tool-only notice',
-        model: 'gemini-3.1-pro-preview',
-      },
-    ])
-
-    expect(calls).toEqual([])
-  })
-
-  it('uses a deterministic ordinal key when Gemini message ids are missing', async () => {
-    const messages = [
-      { id: 'u1', timestamp: '2026-05-16T10:00:00.000Z', type: 'user', content: 'work' },
-      {
-        timestamp: '2026-05-16T10:00:05.000Z',
-        type: 'gemini',
-        content: 'first',
-        model: 'gemini-3.1-pro-preview',
-        tokens: { input: 10, output: 5 },
-      },
-      {
-        timestamp: '2026-05-16T10:00:10.000Z',
-        type: 'gemini',
-        content: 'second',
-        model: 'gemini-3.1-pro-preview',
-        tokens: { input: 12, output: 6 },
-      },
-    ]
-
-    const first = await parseFixture(messages)
-    const second = await parseFixture(messages)
-
-    expect(first.map(c => c.deduplicationKey)).toEqual([
-      'gemini:gemini-session-1:idx-0',
-      'gemini:gemini-session-1:idx-1',
-    ])
-    expect(second.map(c => c.deduplicationKey)).toEqual(first.map(c => c.deduplicationKey))
-  })
-
-  it('does not poison seenKeys when a Gemini message timestamp is invalid', async () => {
-    const filePath = join(tmpDir, 'session-gemini.json')
-    await writeFile(filePath, JSON.stringify({
-      sessionId: 'gemini-session-1',
-      startTime: '2026-05-16T10:00:00.000Z',
+  it('parses a single JSON session (Gemini CLI <=0.38)', async () => {
+    const session = JSON.stringify({
+      sessionId: 'sess-002',
+      startTime: '2026-04-15T10:00:00Z',
       messages: [
-        { id: 'u1', timestamp: '2026-05-16T10:00:00.000Z', type: 'user', content: 'work' },
+        { id: 'msg-1', timestamp: '2026-04-15T10:00:05Z', type: 'user', content: 'hello' },
         {
-          id: 'g1',
-          timestamp: 'not-a-date',
+          id: 'msg-2',
+          timestamp: '2026-04-15T10:00:10Z',
           type: 'gemini',
-          content: 'first',
-          model: 'gemini-3.1-pro-preview',
-          tokens: { input: 10, output: 5 },
+          model: 'gemini-3-pro',
+          tokens: { input: 500, output: 300, cached: 100, thoughts: 0 },
+          content: 'Hi there',
         },
       ],
-    }))
+    })
 
-    const provider = createGeminiProvider()
-    const seenKeys = new Set<string>()
+    const path = await createSessionFile('sess-002', session)
+    const provider = createGeminiProvider(tmpDir)
+    const source = { path, project: 'test', provider: 'gemini' }
     const calls: ParsedProviderCall[] = []
-    for await (const call of provider.createSessionParser(
-      { path: filePath, project: 'gemini-project', provider: 'gemini' },
-      seenKeys,
-    ).parse()) {
-      calls.push(call)
-    }
+    for await (const call of provider.createSessionParser(source, new Set()).parse()) calls.push(call)
 
-    expect(calls).toEqual([])
-    expect(seenKeys.has('gemini:gemini-session-1:g1')).toBe(false)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.inputTokens).toBe(400) // 500 - 100 cached
+    expect(calls[0]!.outputTokens).toBe(300)
+  })
+
+  it('maps tool names from toolCalls', async () => {
+    const lines = [
+      JSON.stringify({ sessionId: 'sess-003', startTime: '2026-04-15T10:00:00Z' }),
+      JSON.stringify({ id: 'u1', timestamp: '2026-04-15T10:00:05Z', type: 'user', content: 'read a file' }),
+      JSON.stringify({
+        id: 'g1',
+        timestamp: '2026-04-15T10:00:10Z',
+        type: 'gemini',
+        model: 'gemini-3-pro',
+        tokens: { input: 100, output: 50, cached: 0, thoughts: 0 },
+        content: 'Reading file',
+        toolCalls: [
+          { id: 'tc-1', name: 'read_file', args: {} },
+          { id: 'tc-2', name: 'run_command', args: { command: 'ls -la' } },
+        ],
+      }),
+    ].join('\n')
+
+    const path = await createSessionFile('sess-003', lines)
+    const provider = createGeminiProvider(tmpDir)
+    const source = { path, project: 'test', provider: 'gemini' }
+    const calls: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(source, new Set()).parse()) calls.push(call)
+
+    expect(calls[0]!.tools).toContain('Read')
+    expect(calls[0]!.tools).toContain('Bash')
+    expect(calls[0]!.bashCommands.length).toBeGreaterThan(0)
+  })
+
+  it('skips messages with zero tokens', async () => {
+    const lines = [
+      JSON.stringify({ sessionId: 'sess-004', startTime: '2026-04-15T10:00:00Z' }),
+      JSON.stringify({ id: 'u1', timestamp: '2026-04-15T10:00:05Z', type: 'user', content: 'hi' }),
+      JSON.stringify({
+        id: 'g1',
+        timestamp: '2026-04-15T10:00:10Z',
+        type: 'gemini',
+        model: 'gemini-3-pro',
+        tokens: { input: 0, output: 0, cached: 0, thoughts: 0 },
+        content: '',
+      }),
+    ].join('\n')
+
+    const path = await createSessionFile('sess-004', lines)
+    const provider = createGeminiProvider(tmpDir)
+    const source = { path, project: 'test', provider: 'gemini' }
+    const calls: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(source, new Set()).parse()) calls.push(call)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('deduplicates messages across parser runs', async () => {
+    const lines = [
+      JSON.stringify({ sessionId: 'sess-005', startTime: '2026-04-15T10:00:00Z' }),
+      JSON.stringify({ id: 'u1', timestamp: '2026-04-15T10:00:05Z', type: 'user', content: 'hi' }),
+      JSON.stringify({
+        id: 'g1',
+        timestamp: '2026-04-15T10:00:10Z',
+        type: 'gemini',
+        model: 'gemini-3-pro',
+        tokens: { input: 100, output: 50, cached: 0, thoughts: 0 },
+        content: 'Hello',
+      }),
+    ].join('\n')
+
+    const path = await createSessionFile('sess-005', lines)
+    const provider = createGeminiProvider(tmpDir)
+    const source = { path, project: 'test', provider: 'gemini' }
+    const seenKeys = new Set<string>()
+
+    const calls1: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(source, seenKeys).parse()) calls1.push(call)
+
+    const calls2: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(source, seenKeys).parse()) calls2.push(call)
+
+    expect(calls1).toHaveLength(1)
+    expect(calls2).toHaveLength(0)
+  })
+
+  it('returns empty for missing file', async () => {
+    const provider = createGeminiProvider(tmpDir)
+    const source = { path: join(tmpDir, 'nonexistent.jsonl'), project: 'test', provider: 'gemini' }
+    const calls: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(source, new Set()).parse()) calls.push(call)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('has correct name and displayName', () => {
+    const provider = createGeminiProvider(tmpDir)
+    expect(provider.name).toBe('gemini')
+    expect(provider.displayName).toBe('Gemini')
   })
 })

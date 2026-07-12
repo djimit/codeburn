@@ -277,6 +277,66 @@ export function computeWorkingStyle(projects: ProjectSummary[], modelA: string, 
   ]
 }
 
+export type ModelRecommendation = {
+  model: string
+  reason: string
+  score: number
+  stats: {
+    costPerEdit: number | null
+    oneShotRate: number | null
+    totalEdits: number
+    totalCost: number
+  }
+}
+
+export function recommendModel(stats: ModelStats[], minEdits = 10): ModelRecommendation | null {
+  if (stats.length === 0) return null
+
+  const eligible = stats.filter(s => s.editTurns >= minEdits)
+  if (eligible.length === 0) return null
+
+  const scored = eligible.map(s => {
+    const costPerEdit = s.editCost / s.editTurns
+    const oneShotRate = s.editTurns > 0 ? (s.oneShotTurns / s.editTurns) * 100 : null
+    const editEfficiency = oneShotRate !== null ? oneShotRate / 100 : 0
+    const costScore = costPerEdit > 0 ? Math.max(0, 1 - (costPerEdit / 2)) : 0.5
+    const score = (editEfficiency * 0.6) + (costScore * 0.4)
+
+    return {
+      model: s.model,
+      costPerEdit,
+      oneShotRate,
+      totalEdits: s.editTurns,
+      totalCost: s.cost,
+      score,
+    }
+  })
+
+  scored.sort((a, b) => b.score - a.score)
+  const best = scored[0]!
+
+  const reasonParts: string[] = []
+  if (best.oneShotRate !== null && best.oneShotRate >= 70) {
+    reasonParts.push(`high one-shot rate (${Math.round(best.oneShotRate)}%)`)
+  }
+  if (best.costPerEdit > 0) {
+    reasonParts.push(`low cost/edit ($${best.costPerEdit.toFixed(4)})`)
+  }
+  reasonParts.push(`${best.totalEdits} edits tracked`)
+
+  return {
+    model: best.model,
+    reason: reasonParts.join(', '),
+    score: Math.round(best.score * 100) / 100,
+    stats: {
+      costPerEdit: best.costPerEdit,
+      oneShotRate: best.oneShotRate,
+      totalEdits: best.totalEdits,
+      totalCost: best.totalCost,
+    },
+  }
+}
+
 const SELF_CORRECTION_PATTERNS = [
   /\bmy mistake\b/i,
   /\bmy bad\b/i,

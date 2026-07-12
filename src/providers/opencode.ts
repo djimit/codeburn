@@ -63,4 +63,6 @@ export function createOpenCodeProvider(dataDir?: string): Provider {
   }
 }
 
-export const opencode = createOpenCodeProvider()
+export const opencode = createOpenCodeProvider(
+  process.env['OPENCODE_DATA_DIR'] ?? process.env['CODEBURN_OPENCODE_DATA_DIR'],
+)

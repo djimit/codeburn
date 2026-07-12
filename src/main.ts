@@ -22,6 +22,9 @@ import {
 } from './antigravity-statusline.js'
 import { clearPlan, readConfig, readPlan, readPlans, saveConfig, savePlan, getConfigFilePath, type Plan, type PlanId, type PlanProvider } from './config.js'
 import { clampResetDay, getPlanUsageOrNull, getPlanUsages, type PlanUsage } from './plan-usage.js'
+import { computeBudgetStatus, formatBudgetStatus } from './budget.js'
+import { runDoctor, formatDoctorReport } from './doctor.js'
+import { checkSessionGuard, formatGuardStatus } from './session-guard.js'
 import { getPresetPlan, isPlanId, isPlanProvider, PLAN_IDS, PLAN_PROVIDERS, planDisplayName } from './plans.js'
 import { createRequire } from 'node:module'
 
@@ -1033,11 +1036,18 @@ program
   .description('Find token waste and get exact fixes')
   .option('-p, --period <period>', 'Analysis period: today, week, 30days, month, all', '30days')
   .option('--provider <provider>', 'Filter by provider (e.g. claude, gemini, cursor, copilot)', 'all')
+  .option('--apply', 'Auto-apply safe fixes (project-scoped MCP config)')
   .action(async (opts) => {
     await loadPricing()
     const { range, label } = getDateRange(opts.period)
     const projects = await parseAllSessions(range, opts.provider)
-    await runOptimize(projects, label, range)
+    if (opts.apply) {
+      const { applyOptimizeFixes } = await import('./apply-fixes.js')
+      const result = await applyOptimizeFixes(projects, label, range)
+      console.log(`\n  Applied ${result.applied} fixes, skipped ${result.skipped}.\n`)
+    } else {
+      await runOptimize(projects, label, range)
+    }
   })
 
 program
@@ -1049,6 +1059,28 @@ program
     await loadPricing()
     const { range } = getDateRange(opts.period)
     await renderCompare(range, opts.provider)
+  })
+
+program
+  .command('recommend')
+  .description('Recommend the most efficient model based on your usage history')
+  .option('-p, --period <period>', 'Analysis period: today, week, 30days, month, all', 'all')
+  .option('--provider <provider>', 'Filter by provider (e.g. claude, gemini, cursor, copilot)', 'all')
+  .option('--min-edits <n>', 'Minimum edit turns for eligibility', (v: string) => parseInt(v, 10), 10)
+  .action(async (opts) => {
+    await loadPricing()
+    const { range } = getDateRange(opts.period)
+    const projects = await parseAllSessions(range, opts.provider)
+    const { aggregateModelStats, recommendModel } = await import('./compare-stats.js')
+    const stats = aggregateModelStats(projects)
+    const rec = recommendModel(stats, opts.minEdits)
+    if (!rec) {
+      console.log('\n  Not enough edit data to make a recommendation. Use --min-edits to lower the threshold.\n')
+      return
+    }
+    console.log(`\n  Recommended: ${rec.model}`)
+    console.log(`  Reason: ${rec.reason}`)
+    console.log(`  Score: ${rec.score}/1.0\n`)
   })
 
 program
@@ -1169,6 +1201,83 @@ program
     console.log = ((...args: unknown[]) => process.stderr.write(args.join(' ') + '\n')) as typeof console.log
     const { startStdioServer } = await import('./mcp/server.js')
     await startStdioServer(version)
+  })
+
+program
+  .command('doctor')
+  .description('Diagnose detection status and common issues per provider')
+  .action(async () => {
+    const report = await runDoctor()
+    process.stderr.write(formatDoctorReport(report))
+    const hasErrors = report.providers.some(p => p.warnings.length > 0) || !report.node.ok
+    if (hasErrors) process.exitCode = 1
+  })
+
+program
+  .command('guard')
+  .description('Check context budget and warn about excessive tool/skill/memory overhead')
+  .option('--project <path>', 'Project path (defaults to cwd)')
+  .option('--context <n>', 'Model context window size', (v: string) => parseInt(v, 10), 200_000)
+  .action(async (opts) => {
+    const projectPath = opts.project ?? process.cwd()
+    const status = await checkSessionGuard(projectPath, opts.context)
+    process.stderr.write(formatGuardStatus(status) + '\n')
+    if (status.level === 'critical') process.exitCode = 2
+    else if (status.level === 'warning') process.exitCode = 1
+  })
+
+program
+  .command('budget [action]')
+  .description('Set or check a monthly spend budget with alerts')
+  .option('--monthly-usd <n>', 'Monthly budget in USD', parseNumber)
+  .option('--alert-at <n>', 'Alert threshold percent (0-100)', parseNumber, 80)
+  .option('--check', 'Check current budget status and exit non-zero if exceeded')
+  .option('--disable', 'Disable budget tracking')
+  .action(async (action?: string, opts?: { monthlyUsd?: number; alertAt?: number; check?: boolean; disable?: boolean }) => {
+    const config = await readConfig()
+
+    if (opts?.disable) {
+      await saveConfig({ ...config, budget: { monthlyUsd: 0, alertAtPercent: 80, enabled: false } })
+      console.log('\n  Budget tracking disabled.\n')
+      return
+    }
+
+    if (action === 'set' && opts?.monthlyUsd) {
+      await saveConfig({
+        ...config,
+        budget: { monthlyUsd: opts.monthlyUsd, alertAtPercent: opts.alertAt ?? 80, enabled: true },
+      })
+      console.log(`\n  Budget set: $${opts.monthlyUsd}/month, alert at ${opts.alertAt ?? 80}%.\n`)
+      return
+    }
+
+    if (opts?.check) {
+      if (!config.budget?.enabled) process.exit(0)
+      await loadPricing()
+      const { range } = getDateRange('month')
+      const projects = await parseAllSessions(range, 'all')
+      const status = computeBudgetStatus(projects, config.budget)
+      if (status) {
+        process.stderr.write(formatBudgetStatus(status))
+        if (status.exceeded) process.exitCode = 2
+        else if (status.alerting) process.exitCode = 1
+      }
+      return
+    }
+
+    if (config.budget?.enabled) {
+      await loadPricing()
+      const { range } = getDateRange('month')
+      const projects = await parseAllSessions(range, 'all')
+      const status = computeBudgetStatus(projects, config.budget)
+      if (status) {
+        process.stderr.write(formatBudgetStatus(status))
+        if (status.exceeded) process.exitCode = 2
+        else if (status.alerting) process.exitCode = 1
+      }
+    } else {
+      console.log('\n  No budget configured. Use: codeburn budget set --monthly-usd <n>\n')
+    }
   })
 
 program.parse()

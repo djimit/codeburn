@@ -53,6 +53,11 @@ export type CodeburnConfig = {
   // Matched against the canonical project path: prefix on a path-segment
   // boundary, case-insensitive, trailing-slash and backslash tolerant.
   proxyPaths?: string[]
+  budget?: {
+    monthlyUsd: number
+    alertAtPercent: number
+    enabled: boolean
+  }
 }
 
 function getConfigDir(): string {
