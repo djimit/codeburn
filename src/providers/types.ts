@@ -4,6 +4,7 @@ export type SessionSource = {
   path: string
   project: string
   provider: string
+  configDir?: string
 }
 
 export type SessionParser = {

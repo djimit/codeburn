@@ -136,6 +136,7 @@ export type SessionSummary = {
   totalCostUSD: number
   totalSavingsUSD: number
   totalCostIsEstimated?: boolean
+  configDir?: string
   totalInputTokens: number
   totalOutputTokens: number
   totalCacheReadTokens: number

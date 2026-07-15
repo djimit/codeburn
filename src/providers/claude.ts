@@ -201,7 +201,7 @@ export const claude: Provider = {
         // `project: dirName` is identical across config dirs for the same
         // sanitized slug, which is exactly what makes the parser merge
         // their sessions into a single ProjectSummary.
-        sources.push({ path: dirPath, project: dirName, provider: 'claude' })
+        sources.push({ path: dirPath, project: dirName, provider: 'claude', configDir: claudeDir })
       }
     }
 

@@ -132,6 +132,33 @@ export function parseJsonlLine(line: string | Buffer): JournalEntry | null {
   }
 }
 
+type ReadLinesOptions = {
+  skipFn?: (head: string) => boolean
+  largeLineAsBuffer?: true
+  byteOffsetTracker?: { lastCompleteLineOffset: number }
+}
+
+async function readAndParseEntries(
+  filePath: string,
+  options: ReadLinesOptions = {},
+): Promise<JournalEntry[] | null> {
+  const entries: JournalEntry[] = []
+  let hasLines = false
+
+  const gen = options.largeLineAsBuffer
+    ? readSessionLines(filePath, options.skipFn, { largeLineAsBuffer: true, byteOffsetTracker: options.byteOffsetTracker })
+    : readSessionLines(filePath, options.skipFn)
+
+  for await (const line of gen) {
+    hasLines = true
+    const entry = parseJsonlLine(line)
+    if (entry) entries.push(compactEntry(entry))
+  }
+
+  if (!hasLines || entries.length === 0) return null
+  return entries
+}
+
 const RAW_HEAD_BYTES = 2048
 
 type JsonValueBounds = {
@@ -1265,6 +1292,7 @@ function buildSessionSummary(
   project: string,
   turns: ClassifiedTurn[],
   mcpInventory?: string[],
+  configDir?: string,
 ): SessionSummary {
   const modelBreakdown: SessionSummary['modelBreakdown'] = Object.create(null)
   const toolBreakdown: SessionSummary['toolBreakdown'] = Object.create(null)
@@ -1390,6 +1418,7 @@ function buildSessionSummary(
     skillBreakdown,
     subagentBreakdown,
     ...(mcpInventory && mcpInventory.length > 0 ? { mcpInventory } : {}),
+    ...(configDir ? { configDir } : {}),
   }
 }
 
@@ -1408,9 +1437,6 @@ async function parseSessionFile(
       if (s.mtimeMs < dateRange.start.getTime()) return null
     } catch { /* fall through to normal read; missing stat shouldn't break parsing */ }
   }
-  const entries: JournalEntry[] = []
-  let hasLines = false
-
   // When a dateRange is given, skip user/assistant lines whose timestamp
   // is older than range.start - 24h without calling JSON.parse. Huge lines
   // that cannot be skipped are yielded as Buffers and compact-parsed without
@@ -1422,15 +1448,8 @@ async function parseSessionFile(
     ? (head: string) => shouldSkipLine(head, earlySkipThreshold)
     : undefined
 
-  for await (const line of readSessionLines(filePath, skipFn, { largeLineAsBuffer: true })) {
-    hasLines = true
-    const entry = parseJsonlLine(line)
-    if (entry) entries.push(compactEntry(entry))
-  }
-
-  if (!hasLines) return null
-
-  if (entries.length === 0) return null
+  const entries = await readAndParseEntries(filePath, { skipFn, largeLineAsBuffer: true })
+  if (entries === null) return null
 
   const sessionId = basename(filePath, '.jsonl')
   const dedupedEntries = dedupeStreamingMessageIds(entries)
@@ -1508,7 +1527,7 @@ export async function readAgentType(filePath: string): Promise<string | undefine
 }
 
 async function scanProjectDirs(
-  dirs: Array<{ path: string; name: string }>,
+  dirs: Array<{ path: string; name: string; configDir?: string }>,
   seenMsgIds: Set<string>,
   diskCache: SessionCache,
   dateRange?: DateRange,
@@ -1516,11 +1535,11 @@ async function scanProjectDirs(
   const section = getOrCreateProviderSection(diskCache, 'claude')
   const allDiscoveredFiles = new Set<string>()
 
-  type FileInfo = { dirName: string; fp: NonNullable<Awaited<ReturnType<typeof fingerprintFile>>> }
-  const unchangedFiles: Array<{ filePath: string; dirName: string; cached: CachedFile }> = []
+  type FileInfo = { dirName: string; configDir?: string; fp: NonNullable<Awaited<ReturnType<typeof fingerprintFile>>> }
+  const unchangedFiles: Array<{ filePath: string; dirName: string; configDir?: string; cached: CachedFile }> = []
   const changedFiles: Array<{ filePath: string; info: FileInfo }> = []
 
-  for (const { path: dirPath, name: dirName } of dirs) {
+  for (const { path: dirPath, name: dirName, configDir } of dirs) {
     const jsonlFiles = await collectJsonlFiles(dirPath)
     for (const filePath of jsonlFiles) {
       allDiscoveredFiles.add(filePath)
@@ -1529,9 +1548,9 @@ async function scanProjectDirs(
 
       const action = reconcileFile(fp, section.files[filePath])
       if (action.action === 'unchanged') {
-        unchangedFiles.push({ filePath, dirName, cached: section.files[filePath]! })
+        unchangedFiles.push({ filePath, dirName, configDir, cached: section.files[filePath]! })
       } else {
-        changedFiles.push({ filePath, info: { dirName, fp } })
+        changedFiles.push({ filePath, info: { dirName, configDir, fp } })
       }
     }
   }
@@ -1590,11 +1609,11 @@ async function scanProjectDirs(
   const projectMap = new Map<string, { project: string; projectPath: string; sessions: SessionSummary[]; dirNames: Set<string> }>()
 
   const allFiles = [
-    ...unchangedFiles.map(f => ({ filePath: f.filePath, dirName: f.dirName })),
-    ...changedFiles.map(f => ({ filePath: f.filePath, dirName: f.info.dirName })),
+    ...unchangedFiles.map(f => ({ filePath: f.filePath, dirName: f.dirName, configDir: f.configDir })),
+    ...changedFiles.map(f => ({ filePath: f.filePath, dirName: f.info.dirName, configDir: f.info.configDir })),
   ]
 
-  for (const { filePath, dirName } of allFiles) {
+  for (const { filePath, dirName, configDir } of allFiles) {
     const cachedFile = section.files[filePath]
     if (!cachedFile || cachedFile.turns.length === 0) continue
 
@@ -1616,7 +1635,7 @@ async function scanProjectDirs(
     const projectPath = cachedFile.canonicalCwd ?? unsanitizePath(dirName)
     const projectName = cachedFile.canonicalProjectName ?? dirName
     const mcpInv = cachedFile.mcpInventory.length > 0 ? cachedFile.mcpInventory : undefined
-    const session = buildSessionSummary(sessionId, projectName, classifiedTurns, mcpInv)
+    const session = buildSessionSummary(sessionId, projectName, classifiedTurns, mcpInv, configDir)
     session.agentType = cachedFile.agentType
 
     if (session.apiCalls > 0) {
@@ -1878,18 +1897,7 @@ async function parseClaudeEntries(
   filePath: string,
   tracker: { lastCompleteLineOffset: number },
 ): Promise<JournalEntry[] | null> {
-  const entries: JournalEntry[] = []
-  let hasLines = false
-  for await (const line of readSessionLines(filePath, undefined, {
-    largeLineAsBuffer: true,
-    byteOffsetTracker: tracker,
-  })) {
-    hasLines = true
-    const entry = parseJsonlLine(line)
-    if (entry) entries.push(compactEntry(entry))
-  }
-  if (!hasLines || entries.length === 0) return null
-  return entries
+  return readAndParseEntries(filePath, { largeLineAsBuffer: true, byteOffsetTracker: tracker })
 }
 
 function getOrCreateProviderSection(cache: SessionCache, provider: string): ProviderSection {
@@ -2250,7 +2258,7 @@ export async function parseAllSessions(dateRange?: DateRange, providerFilter?: s
   const claudeSources = allSources.filter(s => s.provider === 'claude')
   const nonClaudeSources = allSources.filter(s => s.provider !== 'claude')
 
-  const claudeDirs = claudeSources.map(s => ({ path: s.path, name: s.project }))
+  const claudeDirs = claudeSources.map(s => ({ path: s.path, name: s.project, configDir: s.configDir }))
   const claudeProjects = await scanProjectDirs(claudeDirs, seenMsgIds, diskCache, dateRange)
 
   const providerGroups = new Map<string, Array<{ path: string; project: string }>>()
